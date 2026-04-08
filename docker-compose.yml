@@ -8,14 +8,19 @@
 
 volumes:
   certs:
+    name: elk-certs
     driver: local
   pubcerts:
+    name: elk-pubcerts
     driver: local
   esdata01:
+    name: esdata01
     driver: local
   kibanadata:
+    name: kibanadata
     driver: local
   logstashdata01:
+    name: logstashdata01
     driver: local
 
 networks:
@@ -75,7 +80,7 @@ services:
         chown -R root:root config/certs;
         find . -type d -exec chmod 750 \{\} \;;
         find . -type f -exec chmod 640 \{\} \;;
-        # Copy the public CA cert file and give read permissions to everyone 
+        # Copy the public CA cert file and give read permissions to everyone
         cp config/certs/ca/ca.crt config/pub_certs/ca.crt
         chmod 644 config/pub_certs/ca.crt
         chmod 755 config/pub_certs
@@ -107,7 +112,10 @@ services:
       - cluster.name=${CLUSTER_NAME}
       - discovery.type=single-node
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
-      - bootstrap.memory_lock=true
+      # INFO: Rootless mode
+      - bootstrap.memory_lock=false
+      # INFO: Non-rootless mode
+      #- bootstrap.memory_lock=true
       - xpack.security.enabled=true
       - xpack.security.http.ssl.enabled=true
       - xpack.security.http.ssl.key=certs/es01/es01.key
@@ -121,10 +129,13 @@ services:
       - xpack.license.self_generated.type=${LICENSE}
       - xpack.ml.use_auto_machine_memory_percent=true
     mem_limit: ${ES_MEM_LIMIT}
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
+    # NOTE: With Docker in rootless mode, container cannot have unlimited locked-in-memory address space
+    # Therefore, memlock with -1:-1 is not possible (see https://github.com/elastic/start-local/issues/66)
+    # Check rootless mode with: docker info --format '{{ .SecurityOptions }}' 2>/dev/null
+    #ulimits:
+      #memlock:
+      #  soft: -1
+      #  hard: -1
     networks:
       - elk_net
     healthcheck:
@@ -145,12 +156,16 @@ services:
   logstash01:
     container_name: logstash01
     image: docker.elastic.co/logstash/logstash:${STACK_VERSION}
-    restart: unless-stopped
+    # INFO: You can specify which pipeline to run with a -f option
+    # In that case, Logstash will ignore the pipelines.yml file
+    # When you start Logstash without arguments, it will read the pipelines.yml file and instantiate all pipelines specified in the file
+    # command: /usr/share/logstash/bin/logstash -f /usr/share/logstash/pipeline/logstash-apache.conf
     volumes:
       - pubcerts:/usr/share/logstash/config/certs
       - logstashdata01:/usr/share/logstash/data
-      - ./logstash.conf:/usr/share/logstash/pipeline/logstash.conf:ro
-      - ./logstash_ingest_data:/usr/share/logstash/ingest_data
+      - ./logstash-ingest-data:/usr/share/logstash/ingest-data
+      - ./logstash-pipelines:/usr/share/logstash/pipeline
+      - ./logstash-pipelines.yml:/usr/share/logstash/config/pipelines.yml
     environment:
       - ELASTIC_HOSTS=https://es01:9200
       - ELASTIC_USER=elastic
