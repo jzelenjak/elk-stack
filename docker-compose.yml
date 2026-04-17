@@ -1,102 +1,32 @@
----
-# Single-node Elasticsearch cluster with Kibana and Logstash
+# Single-node Elasticsearch cluster with Kibana, Logstash, and Filebeat
 # Resources:
 # - https://www.elastic.co/blog/getting-started-with-the-elastic-stack-and-docker-compose
 # - https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-basic
 # - https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-compose
+# - https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-kibana-with-docker
 # - https://github.com/elastic/elasticsearch/tree/main/docs/reference/setup/install/docker
-
-volumes:
-  certs:
-    name: elk-certs
-    driver: local
-  pubcerts:
-    name: elk-pubcerts
-    driver: local
-  esdata01:
-    name: esdata01
-    driver: local
-  kibanadata:
-    name: kibanadata
-    driver: local
-  logstashdata01:
-    name: logstashdata01
-    driver: local
-  filebeatdata01:
-    name: filebeatdata01
-    driver: local
-
-networks:
-  elk_net:
-    driver: bridge
-    name: elk-net
-    external: false
-    ipam:
-      config:
-        - subnet: 172.19.0.0/24
-    driver_opts:
-      com.docker.network.bridge.name: "elk-net"
 
 services:
   setup:
-    container_name: elk-stack-setup
+    container_name: elastic_setup
     image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
-    volumes:
-      - certs:/usr/share/elasticsearch/config/certs
-      - pubcerts:/usr/share/elasticsearch/config/pub_certs
     user: "0"
-    command: >
-      bash -c '
-        if [ x${ELASTIC_PASSWORD} == x ]; then
-          echo "Set the ELASTIC_PASSWORD environment variable in the .env file";
-          exit 1;
-        elif [ x${KIBANA_PASSWORD} == x ]; then
-          echo "Set the KIBANA_PASSWORD environment variable in the .env file";
-          exit 1;
-        fi;
-        if [ ! -f config/certs/ca.zip ]; then
-          echo "Creating CA";
-          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
-          unzip config/certs/ca.zip -d config/certs;
-        fi;
-        if [ ! -f config/certs/certs.zip ]; then
-          echo "Creating certs";
-          echo -ne \
-          "instances:\n"\
-          "  - name: es01\n"\
-          "    dns:\n"\
-          "      - es01\n"\
-          "      - localhost\n"\
-          "    ip:\n"\
-          "      - 127.0.0.1\n"\
-          "  - name: kibana\n"\
-          "    dns:\n"\
-          "      - kibana\n"\
-          "      - localhost\n"\
-          "    ip:\n"\
-          "      - 127.0.0.1\n"\
-          > config/certs/instances.yml;
-          bin/elasticsearch-certutil cert --silent --pem -out config/certs/certs.zip --in config/certs/instances.yml --ca-cert config/certs/ca/ca.crt --ca-key config/certs/ca/ca.key;
-          unzip config/certs/certs.zip -d config/certs;
-        fi;
-        echo "Setting file permissions"
-        chown -R root:root config/certs;
-        find . -type d -exec chmod 750 \{\} \;;
-        find . -type f -exec chmod 640 \{\} \;;
-        # Copy the public CA cert file and give read permissions to everyone
-        cp config/certs/ca/ca.crt config/pub_certs/ca.crt
-        chmod 644 config/pub_certs/ca.crt
-        chmod 755 config/pub_certs
-        echo "Waiting for Elasticsearch availability";
-        until curl -s --cacert config/certs/ca/ca.crt https://es01:9200 | grep -q "missing authentication credentials"; do sleep 30; done;
-        echo "Setting kibana_system password";
-        until curl -s -X POST --cacert config/certs/ca/ca.crt -u "elastic:${ELASTIC_PASSWORD}" -H "Content-Type: application/json" https://es01:9200/_security/user/kibana_system/_password -d "{\"password\":\"${KIBANA_PASSWORD}\"}" | grep -q "^{}"; do sleep 10; done;
-        echo "All done!";
-      '
+    command: /usr/share/elasticsearch/docker_elastic_setup.sh
+    volumes:
+      - ./docker_elastic_setup.sh:/usr/share/elasticsearch/docker_elastic_setup.sh
+      - ./instances.yml:/usr/share/elasticsearch/config/certs/instances.yml
+      - certs:/usr/share/elasticsearch/config/certs
+      - ca_certs:/usr/share/elasticsearch/config/ca_certs
+      - es01_certs:/usr/share/elasticsearch/config/certs/es01
+      - kibana_certs:/usr/share/elasticsearch/config/certs/kibana
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - KIBANA_PASSWORD=${KIBANA_PASSWORD}
     networks:
-      - elk_net
+      - internal
     healthcheck:
-      test: ["CMD-SHELL", "[ -f config/certs/es01/es01.crt ]"]
+      test: ["CMD-SHELL", "[ -f config/certs/es01/es01.crt ] && [ -f config/ca_certs/ca.crt ]"]
+      start_period: 5s
       interval: 1s
       timeout: 5s
       retries: 120
@@ -106,31 +36,20 @@ services:
     image: docker.elastic.co/elasticsearch/elasticsearch:${STACK_VERSION}
     restart: unless-stopped
     volumes:
-      - certs:/usr/share/elasticsearch/config/certs
-      - esdata01:/usr/share/elasticsearch/data
+      - ./elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml
+      - ca_certs:/usr/share/elasticsearch/config/certs/ca
+      - es01_certs:/usr/share/elasticsearch/config/certs/es01
+      - es01_data:/usr/share/elasticsearch/data
+    environment:
+      - NODE_NAME=es01
+      - CLUSTER_NAME=${CLUSTER_NAME} 
+      - ELASTIC_USER=elastic
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - LICENSE=${LICENSE}
     ports:
       - ${ES_PORT}:9200
-    environment:
-      - node.name=es01
-      - cluster.name=${CLUSTER_NAME}
-      - discovery.type=single-node
-      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
-      # INFO: Rootless mode
-      - bootstrap.memory_lock=false
-      # INFO: Non-rootless mode
-      #- bootstrap.memory_lock=true
-      - xpack.security.enabled=true
-      - xpack.security.http.ssl.enabled=true
-      - xpack.security.http.ssl.key=certs/es01/es01.key
-      - xpack.security.http.ssl.certificate=certs/es01/es01.crt
-      - xpack.security.http.ssl.certificate_authorities=certs/ca/ca.crt
-      - xpack.security.transport.ssl.enabled=true
-      - xpack.security.transport.ssl.key=certs/es01/es01.key
-      - xpack.security.transport.ssl.certificate=certs/es01/es01.crt
-      - xpack.security.transport.ssl.certificate_authorities=certs/ca/ca.crt
-      - xpack.security.transport.ssl.verification_mode=certificate
-      - xpack.license.self_generated.type=${LICENSE}
-      - xpack.ml.use_auto_machine_memory_percent=true
+    networks:
+      - internal
     mem_limit: ${ES_MEM_LIMIT}
     # NOTE: With Docker in rootless mode, container cannot have unlimited locked-in-memory address space
     # Therefore, memlock with -1:-1 is not possible (see https://github.com/elastic/start-local/issues/66)
@@ -139,16 +58,11 @@ services:
       #memlock:
       #  soft: -1
       #  hard: -1
-    networks:
-      - elk_net
     healthcheck:
       test:
-        [
-          "CMD-SHELL",
-          "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'",
-        ]
+        ["CMD-SHELL", "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'"]
       interval: 10s
-      timeout: 10s
+      timeout: 30s
       retries: 120
     depends_on:
       setup:
@@ -156,61 +70,30 @@ services:
     labels:
       co.elastic.logs/module: elasticsearch
 
-  logstash01:
-    container_name: logstash01
-    image: docker.elastic.co/logstash/logstash:${STACK_VERSION}
-    # INFO: You can specify which pipeline to run with a -f option
-    # In that case, Logstash will ignore the pipelines.yml file
-    # When you start Logstash without arguments, it will read the pipelines.yml file and instantiate all pipelines specified in the file
-    # command: /usr/share/logstash/bin/logstash -f /usr/share/logstash/pipeline/logstash-apache.conf
-    # INFO: Test logstash pipeline configuration
-    # command: /usr/share/logstash/bin/logstash -f /usr/share/logstash/pipeline/logstash-json.conf --config.test_and_exit
-    volumes:
-      - pubcerts:/usr/share/logstash/config/certs
-      - logstashdata01:/usr/share/logstash/data
-      - ./logstash-ingest-data:/usr/share/logstash/ingest-data
-      - ./logstash-pipelines:/usr/share/logstash/pipeline
-      - ./logstash-pipelines.yml:/usr/share/logstash/config/pipelines.yml
-    environment:
-      - ELASTIC_HOSTS=https://es01:9200
-      - ELASTIC_USER=elastic
-      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
-      - SSL_CERTIFICATEAUTHORITIES=/usr/share/logstash/config/certs/ca.crt
-    mem_limit: ${LS_MEM_LIMIT}
-    networks:
-      - elk_net
-    depends_on:
-      es01:
-        condition: service_healthy
-      kibana:
-        condition: service_healthy
-    labels:
-      co.elastic.logs/module: logstash
-
   kibana:
     container_name: kibana
     image: docker.elastic.co/kibana/kibana:${STACK_VERSION}
     restart: unless-stopped
     volumes:
-      - pubcerts:/usr/share/kibana/config/certs
-      - kibanadata:/usr/share/kibana/data
-    ports:
-      - ${KIBANA_PORT}:5601
+      - ./kibana.yml:/usr/share/kibana/config/kibana.yml
+      - ca_certs:/usr/share/kibana/config/certs/ca
+      - kibana_certs:/usr/share/kibana/config/certs/kibana
+      - kibana_data:/usr/share/kibana/data
     environment:
       - SERVERNAME=kibana
       - ELASTICSEARCH_HOSTS=https://es01:9200
       - ELASTICSEARCH_USERNAME=kibana_system
       - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
-      - SSL_CERTIFICATEAUTHORITIES=config/certs/ca.crt
-    mem_limit: ${KB_MEM_LIMIT}
+      - KIBANA_ENCRYPTED_SAVED_OBJECTS_ENCRYPTION_KEY=${KIBANA_ENCRYPTED_SAVED_OBJECTS_ENCRYPTION_KEY}
+      - KIBANA_REPORTING_ENCRYPTION_KEY=${KIBANA_REPORTING_ENCRYPTION_KEY}
+      - KIBANA_SECURITY_ENCRYPTION_KEY=${KIBANA_SECURITY_ENCRYPTION_KEY}
+    ports:
+      - ${KIBANA_PORT}:5601
     networks:
-      - elk_net
+      - internal
+    mem_limit: ${KB_MEM_LIMIT}
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -s -I http://localhost:5601 | grep -q 'HTTP/1.1 302 Found'",
-        ]
+      test: ["CMD-SHELL", "curl -fsS --cacert config/certs/ca/ca.crt https://localhost:5601/"]
       interval: 10s
       timeout: 10s
       retries: 120
@@ -220,15 +103,50 @@ services:
     labels:
       co.elastic.logs/module: kibana
 
-  filebeat01:
-    container_name: filebeat01
-    image: docker.elastic.co/beats/filebeat:${STACK_VERSION}
-    user: "0"
+  logstash:
+    container_name: logstash
+    image: docker.elastic.co/logstash/logstash:${STACK_VERSION}
+    # INFO: You can specify which pipeline to run with a -f option
+    # In that case, Logstash will ignore the pipelines.yml file
+    # When you start Logstash without arguments, it will read the pipelines.yml file and instantiate all pipelines specified in the file
+    # command: /usr/share/logstash/bin/logstash -f /usr/share/logstash/pipeline/logstash-apache.conf
+    # INFO: Test logstash pipeline configuration
+    # command: /usr/share/logstash/bin/logstash -f /usr/share/logstash/pipeline/logstash-json.conf --config.test_and_exit
     volumes:
-      - pubcerts:/usr/share/filebeat/certs
-      - filebeatdata01:/usr/share/filebeat/data
-      - ./filebeat-ingest-data:/usr/share/filebeat/ingest-data:ro
+      - ./logstash-pipelines:/usr/share/logstash/pipeline
+      - ./logstash-pipelines.yml:/usr/share/logstash/config/pipelines.yml
+      - ./logstash-ingest-data:/usr/share/logstash/ingest-data
+      - ca_certs:/usr/share/logstash/config/certs/ca
+      - logstash_data:/usr/share/logstash/data
+    environment:
+      - ELASTIC_HOSTS=https://es01:9200
+      - ELASTIC_USER=elastic
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - SSL_CERTIFICATEAUTHORITIES=/usr/share/logstash/config/certs/ca/ca.crt
+    networks:
+      - internal
+    mem_limit: ${LS_MEM_LIMIT}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9600/ > /dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+    depends_on:
+      es01:
+        condition: service_healthy
+      kibana:
+        condition: service_healthy
+    labels:
+      co.elastic.logs/module: logstash
+
+  filebeat:
+    container_name: filebeat
+    image: docker.elastic.co/beats/filebeat:${STACK_VERSION}
+    volumes:
       - ./filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - ./filebeat-ingest-data:/usr/share/filebeat/ingest-data:ro
+      - ca_certs:/usr/share/filebeat/certs
+      - filebeat_data:/usr/share/filebeat/data
       # INFO: Rootless mode:
       #- "$HOME/.local/share/docker/containers:/var/lib/docker/containers:ro"
       #- "$XDG_RUNTIME_DIR/docker.sock:/var/run/docker.sock:ro"
@@ -239,15 +157,42 @@ services:
       - ELASTIC_USER=elastic
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
       - ELASTIC_HOSTS=https://es01:9200
-      - KIBANA_HOSTS=http://kibana:5601
-      - LOGSTASH_HOSTS=http://logstash01:9600
+      - KIBANA_HOSTS=https://kibana:5601
+      - LOGSTASH_HOSTS=http://logstash:9600
       - SSL_CERTIFICATEAUTHORITIES=/usr/share/filebeat/certs/ca.crt
     networks:
-      - elk_net
+      - internal
     depends_on:
-       es01:
-         condition: service_healthy
+      es01:
+        condition: service_healthy
+      kibana:
+        condition: service_healthy
     labels:
       co.elastic.logs/module: filebeat
 
-...
+volumes:
+  certs:
+    driver: local
+  ca_certs:
+    driver: local
+  es01_certs:
+    driver: local
+  kibana_certs:
+    driver: local
+  es01_data:
+    driver: local
+  kibana_data:
+    driver: local
+  logstash_data:
+    driver: local
+  filebeat_data:
+    driver: local
+
+networks:
+  internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${ES_SUBNET}
+    driver_opts:
+      com.docker.network.bridge.name: "elastic_net"

@@ -49,6 +49,7 @@ setup.kibana:
   host: ${KIBANA_HOSTS}
   username: ${ELASTIC_USER}
   password: ${ELASTIC_PASSWORD}
+  ssl.certificate_authorities: ${SSL_CERTIFICATEAUTHORITIES}
 
 setup.dashboards.enabled: true
 
